@@ -4928,12 +4928,6 @@
 
   function animate(){
 
-    // Restore the logical world-space player position for physics/collisions.
-    // The render wrapper temporarily zeroes the camera origin for WebXR.
-    if(renderer.xr.isPresenting && window.__sboxVRLogicalPosition){
-      camera.position.copy(window.__sboxVRLogicalPosition);
-    }
-
     if(window.__sboxVRUpdate) window.__sboxVRUpdate();
     if(!renderer.xr.isPresenting) requestAnimationFrame(animate);
 
@@ -7598,7 +7592,7 @@
       <button data-vrkey="Digit1">1 · Spawnables</button><button data-vrkey="Digit2">2 · NPCs</button>
       <button data-vrkey="Digit3">3 · Save / Load</button><button data-vrkey="Digit4">4 · World Editor</button>
       <button data-vrkey="Digit5">5 · Moving Platforms</button><button data-vrkey="Digit0">0 · Special Object</button>
-    </div><p>Press Y again to close. Aim with a controller and squeeze its trigger to select.</p>
+    </div><p>Press Y again to close. Aim with a controller and squeeze its trigger to select. Press the same button again to close.</p>
   </div>
   <div class="vrPadPanel" id="vrToolsPanel">
     <h2>Tools Menu (X)</h2>
@@ -7607,7 +7601,7 @@
       <button data-vrkey="Minus">- · Bullet type</button><button data-vrkey="BracketRight">] · Special selector</button>
       <button data-vrkey="KeyM">M · Minimap</button><button data-vrkey="KeyV">V · Flight</button>
       <button data-vrkey="ShiftLeft">Shift · Run on/off</button><button data-vrkey="Digit9">9 · Catalyst</button>
-    </div><p>Press X again to close. Aim with a controller and squeeze its trigger to select.</p>
+    </div><p>Press X again to close. Aim with a controller and squeeze its trigger to select. Press the same button again to close.</p>
   </div>
 </div>
 <script>
@@ -7620,8 +7614,10 @@
   const aimDot=document.getElementById('vrAimDot');
   if(!start || !menus || !window.THREE) return;
   let session=null, xrControllers=[], previousButtons=[], menuMode='';
-  const xrRig=new THREE.Group();
-  let xrBasePosition=null, xrBaseRotation=null, xrLastLocalPosition=null, xrRigActive=false;
+  // Keep camera.position as the game's logical world-space player position.
+  // Only shift the camera's base pose while rendering XR, so tracked headset
+  // height is measured from the player's feet without reparenting the camera.
+  let xrBaseRotation=null;
   const raycasterVR=new THREE.Raycaster();
   const tempMatrix=new THREE.Matrix4();
   const rayLineGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-1)]);
@@ -7651,41 +7647,19 @@
     try{
       const supported=await navigator.xr.isSessionSupported('immersive-vr');
       if(!supported){showToast('Immersive VR is not supported by this browser.');return;}
-      // Separate the game's logical player position from the Quest's tracked
-      // head pose. The rig starts at the player's feet; the camera stays at the
-      // game's normal standing height so the desktop gravity code cannot turn
-      // the initial camera position into a huge first-frame displacement.
-      if(!xrRigActive){
-        xrBasePosition=camera.position.clone();
-        xrBaseRotation=camera.rotation.clone();
-        // xrLastLocalPosition stores the logical physics position while VR
-        // is active. The rendered camera origin is zero; headset pose supplies
-        // the user's actual head height relative to the player's feet.
-        xrLastLocalPosition.copy(xrBasePosition);
-        window.__sboxVRLogicalPosition=xrBasePosition.clone();
-        xrRig.position.set(
-          xrBasePosition.x,
-          xrBasePosition.y-standHeight,
-          xrBasePosition.z
-        );
-        xrRig.rotation.set(0,0,0);
-        camera.position.set(0,0,0);
-        scene.add(xrRig);
-        xrRig.add(camera);
-        xrRigActive=true;
-      }
+      // Do not reparent the camera. Gameplay physics, collision checks and
+      // object placement all use camera.position as a world-space position.
+      // Reparenting made that world position become a local offset and launched
+      // the player far away on Quest. Keep it intact and offset only for render.
+      if(!xrBaseRotation) xrBaseRotation=camera.rotation.clone();
       session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
       await renderer.xr.setSession(session);
       renderer.setAnimationLoop(animate);
       session.addEventListener('end',()=>{
         session=null;renderer.setAnimationLoop(null);
-        if(xrRigActive){
-          // Restore the desktop camera to the player's final rig position.
-          const worldPos=xrRig.position.clone().add(new THREE.Vector3(0,standHeight,0));
-          xrRig.remove(camera);scene.remove(xrRig);camera.position.copy(worldPos);
-          if(xrBaseRotation)camera.rotation.copy(xrBaseRotation);
-          xrRigActive=false;xrLastLocalPosition=null;window.__sboxVRLogicalPosition=null;
-        }
+        // camera.position was kept in world coordinates throughout VR.
+        if(xrBaseRotation)camera.rotation.copy(xrBaseRotation);
+        xrBaseRotation=null;
         requestAnimationFrame(animate);start.style.display='block';aimDot.style.display='none';menus.style.display='none';menuMode='';
       });
       document.getElementById('mainMenu').style.display='none';
@@ -7799,8 +7773,8 @@
         crouch=stick;
         const rx=axes.length>=4?axes[2]:0;
         if(Math.abs(rx)>.2){
-          if(xrRigActive) xrRig.rotation.y-=rx*.045;
-          else {yaw-=rx*.045;camera.rotation.set(pitch,yaw,0,'YXZ');}
+          yaw-=rx*.045;
+          camera.rotation.set(pitch,yaw,0,'YXZ');
         }
       }
     }
@@ -7824,22 +7798,15 @@
   });
   const originalRender=renderer.render.bind(renderer);
   renderer.render=function(...args){
-    // Move the rig by the gameplay camera's frame displacement, then reset the
-    // local camera to its physics baseline so WebXR head tracking adds correctly.
-    if(xrRigActive && xrBasePosition && xrLastLocalPosition){
-      // Move the rig by the logical player's frame displacement. Keep the
-      // logical position separately so world-space collision tests remain valid.
-      const delta=camera.position.clone().sub(xrLastLocalPosition);
-      if(Number.isFinite(delta.x)&&Number.isFinite(delta.y)&&Number.isFinite(delta.z)){
-        // A single corrupt physics frame must not teleport the player.
-        delta.x=THREE.MathUtils.clamp(delta.x,-0.25,0.25);
-        delta.y=THREE.MathUtils.clamp(delta.y,-0.25,0.25);
-        delta.z=THREE.MathUtils.clamp(delta.z,-0.25,0.25);
-        xrRig.position.add(delta);
-      }
-      xrLastLocalPosition.add(delta);
-      window.__sboxVRLogicalPosition=xrLastLocalPosition.clone();
-      camera.position.set(0,0,0);
+    if(isXR()){
+      // Game logic keeps a normal eye-height world position. WebXR's tracked
+      // local-floor pose already includes head height, so render from floor
+      // level to avoid double-height and never feed a local camera offset back
+      // into the physics simulation.
+      const logicalPosition=camera.position.clone();
+      camera.position.y=logicalPosition.y-standHeight;
+      try{return originalRender(...args);}
+      finally{camera.position.copy(logicalPosition);}
     }
     return originalRender(...args);
   };
