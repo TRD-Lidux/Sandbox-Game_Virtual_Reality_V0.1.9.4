@@ -7614,6 +7614,7 @@
   const aimDot=document.getElementById('vrAimDot');
   if(!start || !menus || !window.THREE) return;
   let session=null, xrControllers=[], previousButtons=[], menuMode='';
+  let xrReferenceSpace=null, vrYawOffset=0;
   // Keep camera.position as the game's logical world-space player position.
   // Only shift the camera's base pose while rendering XR, so tracked headset
   // height is measured from the player's feet without reparenting the camera.
@@ -7636,6 +7637,7 @@
     document.dispatchEvent(new KeyboardEvent('keyup',{code,key:keyValue,bubbles:true}));
   }
   function toggleMenu(which){
+    // Pressing the active menu button closes it; pressing the other opens that menu.
     menuMode=(menuMode===which?'':which);
     menus.style.display=menuMode?'flex':'none';
     numberPanel.style.display=menuMode==='numbers'?'block':'none';
@@ -7652,15 +7654,19 @@
       // Reparenting made that world position become a local offset and launched
       // the player far away on Quest. Keep it intact and offset only for render.
       if(!xrBaseRotation) xrBaseRotation=camera.rotation.clone();
-      session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
+      session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking','dom-overlay'],domOverlay:{root:menus}});
+      renderer.xr.setReferenceSpaceType('local-floor');
       await renderer.xr.setSession(session);
+      xrReferenceSpace=renderer.xr.getReferenceSpace();
+      vrYawOffset=0;
       renderer.setAnimationLoop(animate);
       session.addEventListener('end',()=>{
         session=null;renderer.setAnimationLoop(null);
+        xrReferenceSpace=null;vrYawOffset=0;
         // camera.position was kept in world coordinates throughout VR.
         if(xrBaseRotation)camera.rotation.copy(xrBaseRotation);
         xrBaseRotation=null;
-        requestAnimationFrame(animate);start.style.display='block';aimDot.style.display='none';menus.style.display='none';menuMode='';
+        requestAnimationFrame(animate);start.style.display='block';aimDot.style.display='none';menus.style.display='none';menuMode='';previousY=previousX=previousA=previousLeftTrigger=previousRightTrigger=previousRightGrip=previousCrouch=false;
       });
       document.getElementById('mainMenu').style.display='none';
       start.style.display='none';aimDot.style.display='block';
@@ -7724,17 +7730,19 @@
       if(!src.gamepad)continue;
       const gp=src.gamepad, hand=src.handedness;
       const b=gp.buttons||[], axes=gp.axes||[];
-      const pressed=i=>!!b[i]?.pressed;
+      const fallbackController=hand==='left'?xrControllers[0]:hand==='right'?xrControllers[1]:null;
+      if(fallbackController&&!fallbackController.userData.inputSource)fallbackController.userData.inputSource=src;
+      const pressed=i=>!!b[i]&&(!!b[i].pressed||(Number(b[i].value)||0)>.65);
       if(hand==='left'){
         const y=pressed(5), x=pressed(4), shoot=pressed(0);
         if(y&&!previousY)toggleMenu('numbers');
         if(x&&!previousX)toggleMenu('tools');
         previousY=y;previousX=x;
         if(menuMode){
-          const c=xrControllers.find(q=>q.userData.inputSource===src);
+          const c=xrControllers.find(q=>q.userData.inputSource===src) || xrControllers[hand==='left'?0:1];
           if(shoot&&!previousLeftTrigger&&c)clickMenuAt(c,controllerRays[c.userData.handIndex]);
         }else if(shoot&&!previousLeftTrigger){
-          const c=xrControllers.find(q=>q.userData.inputSource===src);
+          const c=xrControllers.find(q=>q.userData.inputSource===src) || xrControllers[hand==='left'?0:1];
           if(c){
             const pos=c.getWorldPosition(new THREE.Vector3());
             const dir=new THREE.Vector3(0,0,-1).applyQuaternion(c.getWorldQuaternion(new THREE.Quaternion())).multiplyScalar(18);
@@ -7754,10 +7762,10 @@
         }
         previousA=a;
         if(menuMode){
-          const c=xrControllers.find(q=>q.userData.inputSource===src);
+          const c=xrControllers.find(q=>q.userData.inputSource===src) || xrControllers[hand==='left'?0:1];
           if(trigger&&!previousRightTrigger&&c)clickMenuAt(c,controllerRays[c.userData.handIndex]);
         }else{
-          const c=xrControllers.find(q=>q.userData.inputSource===src);
+          const c=xrControllers.find(q=>q.userData.inputSource===src) || xrControllers[hand==='left'?0:1];
           if(trigger&&!previousRightTrigger){
             if(grabbed)throwGrab();
             else if(c){
@@ -7771,10 +7779,14 @@
         }
         previousRightTrigger=trigger;previousRightGrip=grip;
         crouch=stick;
-        const rx=axes.length>=4?axes[2]:0;
-        if(Math.abs(rx)>.2){
-          yaw-=rx*.045;
-          camera.rotation.set(pitch,yaw,0,'YXZ');
+        const rx=axes.length>=4?axes[2]:(axes[0]||0);
+        // WebXR owns the tracked camera orientation, so changing camera.rotation
+        // directly is ignored by many runtimes. Rotate the XR reference space instead.
+        if(Math.abs(rx)>.2 && xrReferenceSpace && typeof XRRigidTransform!=='undefined'){
+          vrYawOffset -= rx*.045;
+          const half=vrYawOffset/2;
+          const offset=new XRRigidTransform({x:0,y:0,z:0},{x:0,y:Math.sin(half),z:0,w:Math.cos(half)});
+          try{renderer.xr.setReferenceSpace(xrReferenceSpace.getOffsetReferenceSpace(offset));}catch(e){}
         }
       }
     }
