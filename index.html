@@ -3913,7 +3913,7 @@
         0,0,-1
       )
       .applyQuaternion(
-        camera.quaternion
+        renderer.xr.isPresenting ? renderer.xr.getCamera(camera).getWorldQuaternion(new THREE.Quaternion()) : camera.quaternion
       )
       .multiplyScalar(10);
 
@@ -7590,7 +7590,7 @@
   let session=null, baseReferenceSpace=null, yawOffset=0, menuMode='';
   const xrControllers=[], controllerRays=[];
   const handState={left:{},right:{}};
-  const menuGroup=new THREE.Group(); menuGroup.visible=false; menuGroup.position.set(0,0,-2.0); camera.add(menuGroup);
+  const menuGroup=new THREE.Group(); menuGroup.visible=false; scene.add(menuGroup);
   const menuButtons=[];
   const rayLineGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-1)]);
   const rayLineMat=new THREE.LineBasicMaterial({color:0x7ddcff});
@@ -7682,6 +7682,12 @@
     if(!isXR()||!session)return;
     const now=performance.now(),dt=Math.max(.001,Math.min(.05,(now-lastControlTime)/1000));lastControlTime=now;
     const sources=Array.from(session.inputSources||[]); let leftAxes=[0,0],rightAxes=[0,0],leftSeen=false,rightSeen=false;
+    if(menuMode){
+      const head=renderer.xr.getCamera(camera);head.updateMatrixWorld(true);
+      const q=head.getWorldQuaternion(new THREE.Quaternion());
+      menuGroup.position.copy(head.getWorldPosition(new THREE.Vector3())).add(new THREE.Vector3(0,0,-1.45).applyQuaternion(q));
+      menuGroup.quaternion.copy(q);menuGroup.updateMatrixWorld(true);
+    }
     for(const src of sources){
       if(!src.gamepad)continue;
       const gp=src.gamepad,b=gp.buttons||[],hand=src.handedness;
@@ -7696,43 +7702,39 @@
         state.shoot=shoot;
       } else if(hand==='right'){
         rightSeen=true;rightAxes=readAxes(gp);const c=getController('right',src);
-        const trigger=pressed(b,0),grip=pressed(b,1),a=pressed(b,4),stick=pressed(b,3);
+        const grabButton=pressed(b,1),placeButton=pressed(b,0),a=(pressed(b,4)||pressed(b,5)),stick=pressed(b,3);
         const was=handState.right;
         if(a&&!was.a){if(flying){camVelY=flySpeed;onGround=false;}else if(jumpsRemaining>0){camVelY=5;jumpsRemaining--;onGround=false;}}
-        if(menuMode&&trigger&&!was.trigger)selectMenu(c);
-        else if(!menuMode&&trigger&&!was.trigger&&!grabbed&&c){
+        if(menuMode&&grabButton&&!was.grabButton)selectMenu(c);
+        else if(!menuMode&&grabButton&&!was.grabButton&&!grabbed&&c){
           try{if(controllerRay(c)){const meshes=objects.filter(o=>o&&o.mesh&&o.mesh.parent&&!['light','blackhole','solarsystem'].includes(o.type)).map(o=>o.mesh);const hits=raycaster.intersectObjects(meshes,true);if(hits.length){const found=findObjectFromHit(hits[0].object);if(found&&found.mesh&&found.vel)grabbed={obj:found,dist:Math.max(.5,Math.min(4,hits[0].distance))};}}}catch(err){console.warn('Quest grab failed:',err);}
         }
-        if(!trigger&&was.trigger&&grabbed){try{throwGrab();}catch(err){console.warn('Quest release failed:',err);dropGrab();}}
-        if(grip&&!was.grip&&!menuMode&&!paused){try{if((selectedBuildType&&buildPreview)||window.__sboxMovingPlatforms?.isPlacing?.())fireKey('Equal');}catch(err){console.warn('Quest placement failed:',err);}}
+        if(!grabButton&&was.grabButton&&grabbed){try{throwGrab();}catch(err){console.warn('Quest release failed:',err);dropGrab();}}
+        if(placeButton&&!was.placeButton&&!menuMode&&!paused){try{if((selectedBuildType&&buildPreview)||window.__sboxMovingPlatforms?.isPlacing?.())fireKey('Equal');}catch(err){console.warn('Quest placement failed:',err);}}
         crouch=stick;
-        was.a=a;was.trigger=trigger;was.grip=grip;was.stick=stick;
+        was.a=a;was.grabButton=grabButton;was.placeButton=placeButton;was.stick=stick;
       }
     }
-    // Direct locomotion against the game's logical world position; this avoids PC key state and XR camera pose conflicts.
-    input.forward=0;input.right=0;camVel.x=0;camVel.z=0;
+    // Feed the game's existing movement/ground/collision system from the left stick.
+    // This keeps locomotion, jump physics and world collisions in one place.
+    input.forward=0;input.right=0;
     if(leftSeen){
       const [sx,sy]=leftAxes;const mag=Math.hypot(sx,sy);
       if(mag>.16){
-        const view=renderer.xr.getCamera(camera);const q=view.getWorldQuaternion(new THREE.Quaternion());
-        const forward=new THREE.Vector3(0,0,-1).applyQuaternion(q).setY(0).normalize();
-        const right=new THREE.Vector3(1,0,0).applyQuaternion(q).setY(0).normalize();
-        const speed=crouch?2.5:(runPressed?12:6);
-        const f=THREE.MathUtils.clamp(-sy,-1,1),r=THREE.MathUtils.clamp(sx,-1,1);
-        const move=forward.multiplyScalar(f).add(right.multiplyScalar(r));if(move.lengthSq()>1)move.normalize();
-        camera.position.addScaledVector(move,speed*dt);
+        input.forward=THREE.MathUtils.clamp(-sy,-1,1);
+        input.right=THREE.MathUtils.clamp(sx,-1,1);
       }
     }
     if(rightSeen){
       const rx=rightAxes[0];
       if(Math.abs(rx)>.18&&baseReferenceSpace&&typeof XRRigidTransform!=='undefined'){
         // Left stick turns left; right stick turns right.
-        yawOffset-=rx*1.8*dt;const half=yawOffset/2;
+        yawOffset+=rx*1.8*dt;const half=yawOffset/2;
         try{renderer.xr.setReferenceSpace(baseReferenceSpace.getOffsetReferenceSpace(new XRRigidTransform({x:0,y:0,z:0},{x:0,y:Math.sin(half),z:0,w:Math.cos(half)})));}catch(e){}
       }
     }
-    // Keep grabbed object in front of the right controller while held.
-    if(grabbed){const src=sources.find(s=>s.handedness==='right'),c=src&&getController('right',src);if(c){const p=c.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0,0,-.35).applyQuaternion(c.getWorldQuaternion(new THREE.Quaternion())));grabbed.obj.mesh.position.copy(p);grabbed.obj.vel.set(0,0,0);}}
+    // The original simulation updates held-object positioning. Avoid teleporting it here,
+    // which fights the physics lerp and causes rapid vertical jitter.
   }
   start.addEventListener('click',async()=>{
     if(!navigator.xr){showToast('WebXR is unavailable. Open this page in Quest Browser.');return;}
