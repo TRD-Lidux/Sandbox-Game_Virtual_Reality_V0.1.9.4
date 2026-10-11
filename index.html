@@ -7662,6 +7662,7 @@
       renderer.setAnimationLoop(animate);
       session.addEventListener('end',()=>{
         session=null;renderer.setAnimationLoop(null);
+        input.forward=0;input.right=0;crouch=false;camVel.set(0,0,0);camVelY=0;
         xrReferenceSpace=null;vrYawOffset=0;
         // camera.position was kept in world coordinates throughout VR.
         if(xrBaseRotation)camera.rotation.copy(xrBaseRotation);
@@ -7732,7 +7733,7 @@
       const b=gp.buttons||[], axes=gp.axes||[];
       const fallbackController=hand==='left'?xrControllers[0]:hand==='right'?xrControllers[1]:null;
       if(fallbackController&&!fallbackController.userData.inputSource)fallbackController.userData.inputSource=src;
-      const pressed=i=>!!b[i]&&(!!b[i].pressed||(Number(b[i].value)||0)>.65);
+      const pressed=i=>!!b[i]&&(b[i].pressed===true||(Number(b[i].value)||0)>.65);
       if(hand==='left'){
         const y=pressed(5), x=pressed(4), shoot=pressed(0);
         if(y&&!previousY)toggleMenu('numbers');
@@ -7750,9 +7751,15 @@
           }
         }
         previousLeftTrigger=shoot;
-        const lx=axes.length>=4?axes[2]:axes[0], ly=axes.length>=4?axes[3]:axes[1];
-        input.right=Math.abs(lx||0)>.16?(lx>0?1:-1):0;
-        input.forward=Math.abs(ly||0)>.16?(ly<0?1:-1):0;
+        // Quest Browser may expose the thumbstick on axes 0/1 or 2/3
+        // depending on the controller mapping. Use whichever pair is active.
+        const pair01=[Number(axes[0])||0,Number(axes[1])||0];
+        const pair23=[Number(axes[2])||0,Number(axes[3])||0];
+        const pairScore=p=>Math.abs(p[0])+Math.abs(p[1]);
+        const stickAxes=pairScore(pair23)>pairScore(pair01)?pair23:pair01;
+        const lx=stickAxes[0], ly=stickAxes[1];
+        input.right=Math.abs(lx)>.16?(lx>0?1:-1):0;
+        input.forward=Math.abs(ly)>.16?(ly<0?1:-1):0;
       }
       if(hand==='right'){
         const trigger=pressed(0), grip=pressed(1), a=pressed(4), stick=pressed(3);
@@ -7775,15 +7782,21 @@
               if(hits.length){const found=findObjectFromHit(hits[0].object);if(found)grabbed={obj:found,dist:Math.max(1,hits[0].distance)};}
             }
           }
-          if(grip&&!previousRightGrip&&!buildMenuOpen&&!paused)key('Equal');
+          // Right grip/squeeze is the build/place action. Avoid synthesizing
+          // a keyboard '+' event: that can trigger unrelated keyboard handlers.
+          if(grip&&!previousRightGrip&&!buildMenuOpen&&!paused&&selectedBuildType&&buildPreview){
+            try{if(typeof window.spawnBuildObject==='function')window.spawnBuildObject();else spawnBuildObject();}catch(err){console.error('VR object placement failed:',err);showToast('Could not place object');}
+          }
         }
         previousRightTrigger=trigger;previousRightGrip=grip;
         crouch=stick;
-        const rx=axes.length>=4?axes[2]:(axes[0]||0);
-        // WebXR owns the tracked camera orientation, so changing camera.rotation
-        // directly is ignored by many runtimes. Rotate the XR reference space instead.
+        const rightAxes01=[Number(axes[0])||0,Number(axes[1])||0];
+        const rightAxes23=[Number(axes[2])||0,Number(axes[3])||0];
+        const rightStick=pairScore(rightAxes23)>pairScore(rightAxes01)?rightAxes23:rightAxes01;
+        const rx=rightStick[0];
+        // Negative stick X should turn left; positive should turn right.
         if(Math.abs(rx)>.2 && xrReferenceSpace && typeof XRRigidTransform!=='undefined'){
-          vrYawOffset -= rx*.045;
+          vrYawOffset += rx*.045;
           const half=vrYawOffset/2;
           const offset=new XRRigidTransform({x:0,y:0,z:0},{x:0,y:Math.sin(half),z:0,w:Math.cos(half)});
           try{renderer.xr.setReferenceSpace(xrReferenceSpace.getOffsetReferenceSpace(offset));}catch(e){}
