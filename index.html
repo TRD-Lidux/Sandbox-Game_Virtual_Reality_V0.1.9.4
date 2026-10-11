@@ -7625,6 +7625,72 @@
   const rayLineGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-1)]);
   const rayLineMat=new THREE.LineBasicMaterial({color:0x7ddcff});
   let controllerRays=[];
+
+  // World-space VR menu: controller rays can hit actual Three.js button meshes.
+  // This avoids relying on desktop DOM pointer coordinates inside Quest Browser.
+  const vrMenuGroup=new THREE.Group();
+  const vrNumberGroup=new THREE.Group(), vrToolsGroup=new THREE.Group();
+  const vrMenuButtons={numbers:[],tools:[]};
+  vrMenuGroup.add(vrNumberGroup,vrToolsGroup);
+  vrMenuGroup.visible=false;
+  scene.add(vrMenuGroup);
+  function makeVRLabelTexture(label){
+    const canvas=document.createElement('canvas');canvas.width=512;canvas.height=160;
+    const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#173447';ctx.fillRect(0,0,512,160);
+    ctx.strokeStyle='#79d8ff';ctx.lineWidth=5;ctx.strokeRect(3,3,506,154);
+    ctx.fillStyle='#ffffff';ctx.font='bold 42px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(label,256,80,480);
+    const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;return texture;
+  }
+  function buildVRMenuGroup(parent,items,rows){
+    const panelH=rows*.30+.28;
+    const panel=new THREE.Mesh(new THREE.PlaneGeometry(1.48,panelH),new THREE.MeshBasicMaterial({color:0x081522,transparent:true,opacity:.94,side:THREE.DoubleSide,depthTest:false}));
+    panel.position.set(0,0,-2.02);panel.renderOrder=1000;parent.add(panel);
+    items.forEach((item,i)=>{
+      const col=i%2,row=Math.floor(i/2);
+      const mesh=new THREE.Mesh(
+        new THREE.PlaneGeometry(.66,.245),
+        new THREE.MeshBasicMaterial({map:makeVRLabelTexture(item.label),transparent:false,side:THREE.DoubleSide,depthTest:false})
+      );
+      mesh.position.set(col===0?-.36:.36,((rows-1)/2-row)*.30,-1.99);
+      mesh.renderOrder=1001;mesh.userData.vrKey=item.code;mesh.userData.vrLabel=item.label;
+      parent.add(mesh);vrMenuButtons[item.menu].push(mesh);
+    });
+  }
+  buildVRMenuGroup(vrNumberGroup,[
+    {menu:'numbers',code:'Digit1',label:'1 · Spawnables'},
+    {menu:'numbers',code:'Digit2',label:'2 · NPCs'},
+    {menu:'numbers',code:'Digit3',label:'3 · Save / Load'},
+    {menu:'numbers',code:'Digit4',label:'4 · World Editor'},
+    {menu:'numbers',code:'Digit5',label:'5 · Platforms'},
+    {menu:'numbers',code:'Digit0',label:'0 · Special Object'}
+  ],3);
+  buildVRMenuGroup(vrToolsGroup,[
+    {menu:'tools',code:'KeyQ',label:'Q · Time stop'},
+    {menu:'tools',code:'Backquote',label:'` · Rain'},
+    {menu:'tools',code:'Minus',label:'- · Bullet type'},
+    {menu:'tools',code:'BracketRight',label:'] · Special selector'},
+    {menu:'tools',code:'KeyM',label:'M · Minimap'},
+    {menu:'tools',code:'KeyV',label:'V · Flight'},
+    {menu:'tools',code:'ShiftLeft',label:'Shift · Run'},
+    {menu:'tools',code:'Digit9',label:'9 · Catalyst'}
+  ],4);
+  vrNumberGroup.visible=false;vrToolsGroup.visible=false;
+  function updateVRMenuPose(){
+    if(!isXR()||!menuMode){vrMenuGroup.visible=false;return;}
+    const head=renderer.xr.getCamera(camera);
+    const pos=head.getWorldPosition(new THREE.Vector3());
+    // camera.position is the logical eye-height position; remove its base height
+    // so this menu follows the tracked head without inheriting the floor offset.
+    pos.y-=standHeight;
+    vrMenuGroup.position.copy(pos);
+    vrMenuGroup.quaternion.copy(head.getWorldQuaternion(new THREE.Quaternion()));
+    vrMenuGroup.visible=true;
+    vrNumberGroup.visible=menuMode==='numbers';
+    vrToolsGroup.visible=menuMode==='tools';
+    vrMenuGroup.updateMatrixWorld(true);
+  }
   const isXR=()=>!!(renderer.xr && renderer.xr.isPresenting);
   function key(code){
     if(code==='ShiftLeft'){
@@ -7640,11 +7706,17 @@
   function toggleMenu(which){
     // Pressing the active menu button closes it; pressing the other opens that menu.
     menuMode=(menuMode===which?'':which);
-    menus.style.display=menuMode?'flex':'none';
-    menus.style.visibility=menuMode?'visible':'hidden';
-    numberPanel.style.display=menuMode==='numbers'?'block':'none';
-    toolsPanel.style.display=menuMode==='tools'?'block':'none';
-    if(menuMode){menus.style.pointerEvents='auto';}else{menus.style.pointerEvents='none';}
+    const visible=!!menuMode;
+    // Use real 3D panels in immersive VR; use DOM panels outside VR.
+    menus.style.display=(!isXR()&&visible)?'flex':'none';
+    menus.style.visibility=(!isXR()&&visible)?'visible':'hidden';
+    numberPanel.style.display=(!isXR()&&menuMode==='numbers')?'block':'none';
+    toolsPanel.style.display=(!isXR()&&menuMode==='tools')?'block':'none';
+    menus.style.pointerEvents=(!isXR()&&visible)?'auto':'none';
+    vrMenuGroup.visible=isXR()&&visible;
+    vrNumberGroup.visible=isXR()&&menuMode==='numbers';
+    vrToolsGroup.visible=isXR()&&menuMode==='tools';
+    if(isXR()&&visible)updateVRMenuPose();
   }
   menus.querySelectorAll('[data-vrkey]').forEach(b=>b.addEventListener('click',()=>key(b.dataset.vrkey)));
   async function enterVR(){
@@ -7697,45 +7769,37 @@
     ray.ray.direction.set(0,0,-1).applyMatrix4(tempMatrix).normalize();
   }
   function clickMenuAt(c,ray){
+    if(!menuMode)return;
+    updateVRMenuPose();
     handleControllerRay(c,ray);
-    ray.params.Line={threshold:.08};
-    const hits=ray.intersectObjects(menus.querySelectorAll?[]:[],true);
-    // DOM menu selection is handled by aiming at the central panel using projected pointer coordinates.
-    const p=c.getWorldPosition(new THREE.Vector3());
-    const dir=new THREE.Vector3(0,0,-1).applyQuaternion(c.getWorldQuaternion(new THREE.Quaternion()));
-    const head=renderer.xr.getCamera(camera);
-    const origin=head.getWorldPosition(new THREE.Vector3());
-    const forward=head.getWorldDirection(new THREE.Vector3());
-    const denom=dir.dot(forward);
-    if(Math.abs(denom)<.15)return;
-    const dist=origin.clone().sub(p).dot(forward)/denom;
-    if(dist<=0)return;
-    const hit=p.clone().addScaledVector(dir,dist);
-    const v=hit.clone().sub(origin);
-    const right=new THREE.Vector3(1,0,0).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()));
-    const up=new THREE.Vector3(0,1,0).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()));
-    const x=v.dot(right), y=v.dot(up);
-    const panel=menuMode==='numbers'?numberPanel:toolsPanel;
-    const rect=panel.getBoundingClientRect();
-    const cx=window.innerWidth/2, cy=window.innerHeight/2;
-    // Approximate panel hit area in head-relative coordinates for controller laser selection.
-    const px=cx+x*500, py=cy-y*500;
-    if(px<rect.left||px>rect.right||py<rect.top||py>rect.bottom)return;
-    const buttons=[...panel.querySelectorAll('button')];
-    const target=buttons.find(b=>{const r=b.getBoundingClientRect();return px>=r.left&&px<=r.right&&py>=r.top&&py<=r.bottom;});
-    if(target)target.click();
+    c.updateMatrixWorld(true);
+    vrMenuGroup.updateMatrixWorld(true);
+    const active=menuMode==='numbers'?vrMenuButtons.numbers:vrMenuButtons.tools;
+    const hits=ray.intersectObjects(active,false);
+    if(hits.length){
+      const code=hits[0].object.userData.vrKey;
+      if(code)key(code);
+    }
   }
+
   let previousY=false, previousX=false, previousA=false, previousLeftTrigger=false, previousRightTrigger=false, previousRightGrip=false, previousCrouch=false;
   function readStickAxes(axes){
-    const pairs=[];
-    if(axes.length>=2)pairs.push([Number(axes[0])||0,Number(axes[1])||0]);
-    if(axes.length>=4)pairs.push([Number(axes[2])||0,Number(axes[3])||0]);
-    // Quest Browser can expose the thumbstick in either pair depending on controller profile.
-    pairs.sort((a,b)=>(Math.abs(b[0])+Math.abs(b[1]))-(Math.abs(a[0])+Math.abs(a[1])));
-    return pairs[0]||[0,0];
+    // XR-standard uses axes 0/1 for the thumbstick. Fall back to 2/3 only
+    // for controller profiles that leave the first pair idle.
+    const x0=Number(axes[0])||0, y0=Number(axes[1])||0;
+    const x1=Number(axes[2])||0, y1=Number(axes[3])||0;
+    if(Math.abs(x0)+Math.abs(y0)>.02 || axes.length<4)return [x0,y0];
+    return [x1,y1];
+  }
+  function buttonLayout(buttons){
+    // Standard XR layout has 6 buttons; some Quest/browser profiles expose 5.
+    return buttons.length>=6
+      ? {stick:3,primary:4,secondary:5}
+      : {stick:2,primary:3,secondary:4};
   }
   function updateVRControls(){
     if(!isXR())return;
+    updateVRMenuPose();
     const sources=session?.inputSources||[];
     for(const src of sources){
       if(!src.gamepad)continue;
@@ -7746,7 +7810,8 @@
       const pressed=i=>!!b[i]&&(!!b[i].pressed||(Number(b[i].value)||0)>.55);
       const state=sourceButtonState.get(src)||{};
       if(hand==='left'){
-        const y=pressed(5), x=pressed(4), shoot=pressed(0);
+        const layout=buttonLayout(b);
+        const x=pressed(layout.primary), y=pressed(layout.secondary), shoot=pressed(0);
         if(y&&!state.y)toggleMenu('numbers');
         if(x&&!state.x)toggleMenu('tools');
         state.y=y;state.x=x;sourceButtonState.set(src,state);
@@ -7768,7 +7833,8 @@
         input.forward=Math.abs(ly)>.16?(ly<0?1:-1):0;
       }
       if(hand==='right'){
-        const trigger=pressed(0), grip=pressed(1), a=pressed(4), stick=pressed(3);
+        const layout=buttonLayout(b);
+        const trigger=pressed(0), grip=pressed(1), a=pressed(layout.primary), stick=pressed(layout.stick);
         if(a&&!state.a){
           if(flying){camVelY=flySpeed;onGround=false;}
           else if(jumpsRemaining>0){camVelY=5;jumpsRemaining--;onGround=false;}
