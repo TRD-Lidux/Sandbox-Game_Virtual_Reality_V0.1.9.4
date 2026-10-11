@@ -4928,6 +4928,7 @@
 
   function animate(){
 
+    if(window.__sboxVRUpdate) window.__sboxVRUpdate();
     if(!renderer.xr.isPresenting) requestAnimationFrame(animate);
 
     const dt =
@@ -4964,24 +4965,19 @@
 
     /* ================= MOVEMENT ================= */
 
+    const movementQuaternion = renderer.xr.isPresenting
+      ? renderer.xr.getCamera(camera).getWorldQuaternion(new THREE.Quaternion())
+      : camera.quaternion;
+
     const forwardVec =
-      new THREE.Vector3(
-        0,0,-1
-      )
-      .applyQuaternion(
-        camera.quaternion
-      )
+      new THREE.Vector3(0,0,-1)
+      .applyQuaternion(movementQuaternion)
       .setY(0)
       .normalize();
 
-
     const rightVec =
-      new THREE.Vector3(
-        1,0,0
-      )
-      .applyQuaternion(
-        camera.quaternion
-      )
+      new THREE.Vector3(1,0,0)
+      .applyQuaternion(movementQuaternion)
       .setY(0)
       .normalize();
 
@@ -6301,7 +6297,7 @@
        RAIN
     ============================================================ */
 
-    resolvePillStaticCollisions();
+    if(window.resolvePillStaticCollisions) window.resolvePillStaticCollisions();
     updateRain(dt);
 
 
@@ -7326,6 +7322,9 @@
       }
     }
   }
+  // The main animation loop lives in a different script block, so explicitly
+  // expose this helper instead of relying on cross-script lexical scope.
+  window.resolvePillStaticCollisions = resolvePillStaticCollisions;
 
 </script>
 
@@ -7615,6 +7614,8 @@
   const aimDot=document.getElementById('vrAimDot');
   if(!start || !menus || !window.THREE) return;
   let session=null, xrControllers=[], previousButtons=[], menuMode='';
+  const xrRig=new THREE.Group();
+  let xrBasePosition=null, xrBaseRotation=null, xrLastLocalPosition=null, xrRigActive=false;
   const raycasterVR=new THREE.Raycaster();
   const tempMatrix=new THREE.Matrix4();
   const rayLineGeo=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-1)]);
@@ -7644,10 +7645,31 @@
     try{
       const supported=await navigator.xr.isSessionSupported('immersive-vr');
       if(!supported){showToast('Immersive VR is not supported by this browser.');return;}
+      // Put the tracked headset under a player rig. The game's physics still
+      // uses camera.position, while its per-frame displacement is applied to the rig.
+      if(!xrRigActive){
+        xrBasePosition=camera.position.clone();
+        xrBaseRotation=camera.rotation.clone();
+        xrLastLocalPosition=camera.position.clone();
+        xrRig.position.copy(xrBasePosition).negate();
+        xrRig.rotation.set(0,0,0);
+        scene.add(xrRig);
+        xrRig.add(camera);
+        xrRigActive=true;
+      }
       session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']});
       await renderer.xr.setSession(session);
       renderer.setAnimationLoop(animate);
-      session.addEventListener('end',()=>{session=null;renderer.setAnimationLoop(null);requestAnimationFrame(animate);start.style.display='block';aimDot.style.display='none';menus.style.display='none';menuMode='';});
+      session.addEventListener('end',()=>{
+        session=null;renderer.setAnimationLoop(null);
+        if(xrRigActive){
+          const worldPos=xrRig.position.clone().add(camera.position);
+          xrRig.remove(camera);scene.remove(xrRig);camera.position.copy(worldPos);
+          if(xrBaseRotation)camera.rotation.copy(xrBaseRotation);
+          xrRigActive=false;xrLastLocalPosition=null;
+        }
+        requestAnimationFrame(animate);start.style.display='block';aimDot.style.display='none';menus.style.display='none';menuMode='';
+      });
       document.getElementById('mainMenu').style.display='none';
       start.style.display='none';aimDot.style.display='block';
       showToast('Quest VR ready · Y menu · X tools');
@@ -7758,7 +7780,10 @@
         previousRightTrigger=trigger;previousRightGrip=grip;
         crouch=stick;
         const rx=axes.length>=4?axes[2]:0;
-        if(Math.abs(rx)>.2){yaw-=rx*.045;camera.rotation.set(pitch,yaw,0,'YXZ');}
+        if(Math.abs(rx)>.2){
+          if(xrRigActive) xrRig.rotation.y-=rx*.045;
+          else {yaw-=rx*.045;camera.rotation.set(pitch,yaw,0,'YXZ');}
+        }
       }
     }
     // Keep held objects aligned to the right-hand controller in VR.
@@ -7780,7 +7805,17 @@
     if(e.code==='KeyX'&&isXR()){toggleMenu('tools');e.preventDefault();}
   });
   const originalRender=renderer.render.bind(renderer);
-  renderer.render=function(...args){updateVRControls();return originalRender(...args);};
+  renderer.render=function(...args){
+    // Move the rig by the gameplay camera's frame displacement, then reset the
+    // local camera to its physics baseline so WebXR head tracking adds correctly.
+    if(xrRigActive && xrBasePosition && xrLastLocalPosition){
+      const delta=camera.position.clone().sub(xrLastLocalPosition);
+      xrRig.position.add(delta);
+      camera.position.copy(xrBasePosition);
+      xrLastLocalPosition.copy(xrBasePosition);
+    }
+    return originalRender(...args);
+  };
 })();
 </script>
 
