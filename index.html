@@ -4928,6 +4928,12 @@
 
   function animate(){
 
+    // Restore the logical world-space player position for physics/collisions.
+    // The render wrapper temporarily zeroes the camera origin for WebXR.
+    if(renderer.xr.isPresenting && window.__sboxVRLogicalPosition){
+      camera.position.copy(window.__sboxVRLogicalPosition);
+    }
+
     if(window.__sboxVRUpdate) window.__sboxVRUpdate();
     if(!renderer.xr.isPresenting) requestAnimationFrame(animate);
 
@@ -7645,14 +7651,25 @@
     try{
       const supported=await navigator.xr.isSessionSupported('immersive-vr');
       if(!supported){showToast('Immersive VR is not supported by this browser.');return;}
-      // Put the tracked headset under a player rig. The game's physics still
-      // uses camera.position, while its per-frame displacement is applied to the rig.
+      // Separate the game's logical player position from the Quest's tracked
+      // head pose. The rig starts at the player's feet; the camera stays at the
+      // game's normal standing height so the desktop gravity code cannot turn
+      // the initial camera position into a huge first-frame displacement.
       if(!xrRigActive){
         xrBasePosition=camera.position.clone();
         xrBaseRotation=camera.rotation.clone();
-        xrLastLocalPosition=camera.position.clone();
-        xrRig.position.copy(xrBasePosition).negate();
+        // xrLastLocalPosition stores the logical physics position while VR
+        // is active. The rendered camera origin is zero; headset pose supplies
+        // the user's actual head height relative to the player's feet.
+        xrLastLocalPosition.copy(xrBasePosition);
+        window.__sboxVRLogicalPosition=xrBasePosition.clone();
+        xrRig.position.set(
+          xrBasePosition.x,
+          xrBasePosition.y-standHeight,
+          xrBasePosition.z
+        );
         xrRig.rotation.set(0,0,0);
+        camera.position.set(0,0,0);
         scene.add(xrRig);
         xrRig.add(camera);
         xrRigActive=true;
@@ -7663,10 +7680,11 @@
       session.addEventListener('end',()=>{
         session=null;renderer.setAnimationLoop(null);
         if(xrRigActive){
-          const worldPos=xrRig.position.clone().add(camera.position);
+          // Restore the desktop camera to the player's final rig position.
+          const worldPos=xrRig.position.clone().add(new THREE.Vector3(0,standHeight,0));
           xrRig.remove(camera);scene.remove(xrRig);camera.position.copy(worldPos);
           if(xrBaseRotation)camera.rotation.copy(xrBaseRotation);
-          xrRigActive=false;xrLastLocalPosition=null;
+          xrRigActive=false;xrLastLocalPosition=null;window.__sboxVRLogicalPosition=null;
         }
         requestAnimationFrame(animate);start.style.display='block';aimDot.style.display='none';menus.style.display='none';menuMode='';
       });
@@ -7809,10 +7827,19 @@
     // Move the rig by the gameplay camera's frame displacement, then reset the
     // local camera to its physics baseline so WebXR head tracking adds correctly.
     if(xrRigActive && xrBasePosition && xrLastLocalPosition){
+      // Move the rig by the logical player's frame displacement. Keep the
+      // logical position separately so world-space collision tests remain valid.
       const delta=camera.position.clone().sub(xrLastLocalPosition);
-      xrRig.position.add(delta);
-      camera.position.copy(xrBasePosition);
-      xrLastLocalPosition.copy(xrBasePosition);
+      if(Number.isFinite(delta.x)&&Number.isFinite(delta.y)&&Number.isFinite(delta.z)){
+        // A single corrupt physics frame must not teleport the player.
+        delta.x=THREE.MathUtils.clamp(delta.x,-0.25,0.25);
+        delta.y=THREE.MathUtils.clamp(delta.y,-0.25,0.25);
+        delta.z=THREE.MathUtils.clamp(delta.z,-0.25,0.25);
+        xrRig.position.add(delta);
+      }
+      xrLastLocalPosition.add(delta);
+      window.__sboxVRLogicalPosition=xrLastLocalPosition.clone();
+      camera.position.set(0,0,0);
     }
     return originalRender(...args);
   };
