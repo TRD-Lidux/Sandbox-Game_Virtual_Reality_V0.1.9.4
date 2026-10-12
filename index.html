@@ -911,6 +911,10 @@
 
   function addObject(o){
 
+    // Dynamic physics meshes can move outside their initial bounding sphere.
+    // In immersive rendering, stale bounds caused spawned objects to disappear
+    // while translating and reappear after a view rotation.
+    if(o.mesh){o.mesh.traverse?.(node=>{if(node.isMesh)node.frustumCulled=false;});}
     scene.add(o.mesh);
 
     objects.push(o);
@@ -7763,7 +7767,7 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
       if(Math.abs(rx)>.18&&baseReferenceSpace&&typeof XRRigidTransform!=='undefined'){
         // Left stick turns left; right stick turns right.
         yawOffset-=rx*1.8*dt;const half=yawOffset/2;
-        try{renderer.xr.setReferenceSpace(baseReferenceSpace.getOffsetReferenceSpace(new XRRigidTransform({x:0,y:0,z:0},{x:0,y:Math.sin(half),z:0,w:Math.cos(half)})));}catch(e){}
+        try{renderer.xr.setReferenceSpace(baseReferenceSpace.getOffsetReferenceSpace(new XRRigidTransform({x:locomotionX,y:0,z:locomotionZ},{x:0,y:Math.sin(half),z:0,w:Math.cos(half)})));}catch(e){}
       }
     }
     // The original simulation updates held-object positioning. Avoid teleporting it here,
@@ -7773,9 +7777,15 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
     if(!navigator.xr){showToast('WebXR is unavailable. Open this page in Quest Browser.');return;}
     try{
       if(!(await navigator.xr.isSessionSupported('immersive-vr'))){showToast('Immersive VR is not supported in this browser.');return;}
-      session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
+      // Request the WebXR DOM Overlay feature where the headset browser supports it.
+      // The custom in-world menu remains the fallback for browsers that do not.
+      const uiRoot=document.getElementById('ui');
+      session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','dom-overlay'],domOverlay:{root:uiRoot}});
       renderer.xr.setReferenceSpaceType('local-floor');renderer.xr.enabled=true;await renderer.xr.setSession(session);
-      baseReferenceSpace=renderer.xr.getReferenceSpace();yawOffset=0;locomotionX=locomotionZ=0;lastControlTime=performance.now();renderer.setAnimationLoop(animate);
+      baseReferenceSpace=renderer.xr.getReferenceSpace();yawOffset=0;locomotionX=locomotionZ=0;lastControlTime=performance.now();
+      // Also cover objects created by older game paths that do not use addObject().
+      scene.traverse(node=>{if(node.isMesh && node!==ground)node.frustumCulled=false;});
+      renderer.setAnimationLoop(animate);
       session.addEventListener('end',()=>{session=null;baseReferenceSpace=null;locomotionX=locomotionZ=0;renderer.setAnimationLoop(null);showMenu('');aimDot.style.display='none';document.body.classList.remove('quest-vr-active');document.getElementById('ui').style.display='';start.style.display='block';requestAnimationFrame(animate);input.forward=input.right=0;crouch=false;});
       document.getElementById('mainMenu').style.display='none';document.getElementById('ui').style.display='none';start.style.display='none';aimDot.style.display='block';document.body.classList.add('quest-vr-active');startMusic();showToast('Quest VR ready · Y menu · X tools');
     }catch(err){console.error('Quest VR start failed',err);showToast('Could not start VR: '+(err.message||err));}
