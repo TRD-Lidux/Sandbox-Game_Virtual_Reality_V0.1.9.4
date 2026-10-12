@@ -7576,8 +7576,10 @@
 <style>
 #vrStart{position:fixed;right:14px;top:14px;z-index:3000;padding:12px 16px;border:1px solid #8bdcff;border-radius:10px;background:#073247;color:white;font-weight:800;cursor:pointer}
 #vrPadMenus{display:none!important}
+/* The game is Quest-first: retain only the explicit VR entry button on desktop. */
+#centerClick,#crosshair,#controls,.pc-controls,#ui{display:none!important}
 #vrAimDot{position:fixed;left:50%;top:50%;width:10px;height:10px;transform:translate(-50%,-50%);border:2px solid white;border-radius:50%;z-index:100;display:none;pointer-events:none}
-body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-vr-active #controls, body.quest-vr-active .pc-controls{display:none!important;}
+body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-vr-active #controls, body.quest-vr-active .pc-controls, body.quest-vr-active #ui{display:none!important;}
 </style>
 <button id="vrStart">Enter Quest 3 VR</button>
 <div id="vrAimDot"></div>
@@ -7598,6 +7600,8 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
   const raycaster=new THREE.Raycaster();
   let lastControlTime=performance.now();
   let lastAxesLeft=[0,0], lastAxesRight=[0,0];
+  let locomotionX=0,locomotionZ=0;
+  let lastMoveForward=0,lastMoveRight=0;
   const isXR=()=>!!(renderer.xr&&renderer.xr.isPresenting);
 
   function mappedKey(code){
@@ -7613,9 +7617,10 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
     document.dispatchEvent(new KeyboardEvent('keydown',{code,key,bubbles:true,cancelable:true}));
     document.dispatchEvent(new KeyboardEvent('keyup',{code,key,bubbles:true,cancelable:true}));
   }
-  // Ignore physical PC gameplay input only while in VR; Quest-mapped synthetic events remain usable.
-  for(const type of ['keydown','keyup','keypress']) window.addEventListener(type,e=>{if(isXR()&&e.isTrusted){e.preventDefault();e.stopImmediatePropagation();}},true);
-  window.addEventListener('mousemove',e=>{if(isXR()&&e.isTrusted){e.preventDefault();e.stopImmediatePropagation();}},true);
+  // Disable physical keyboard/mouse gameplay controls entirely. Untrusted synthetic
+  // key events remain available internally to call the original game feature handlers.
+  for(const type of ['keydown','keyup','keypress']) window.addEventListener(type,e=>{if(e.isTrusted){e.preventDefault();e.stopImmediatePropagation();}},true);
+  for(const type of ['mousemove','mousedown','mouseup','contextmenu','wheel']) window.addEventListener(type,e=>{if(e.isTrusted && e.target!==start){e.preventDefault();e.stopImmediatePropagation();}},true);
 
   function makeLabelTexture(text, selected=false){
     const canvas=document.createElement('canvas'); canvas.width=512; canvas.height=128;
@@ -7634,7 +7639,7 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
     if(!menuMode)return;
     const items=which==='numbers'?
       [['1 · Spawnables','Digit1'],['2 · NPC menu','Digit2'],['4 · World editor','Digit4'],['5 · Moving platforms','Digit5'],['0 · Place special object','Digit0']]:
-      [['Q · Time stop','KeyQ'],['` · Rain','Backquote'],['- · Bullet type','Minus'],['] · Special selector','BracketRight'],['M · Minimap','KeyM'],['V · Flight','KeyV'],['Shift · Run on/off','ShiftLeft'],['9 · Catalyst','Digit9']];
+      [['Q · Time stop','KeyQ'],['` · Rain','Backquote'],['- · Pill colour','Minus'],['] · Special selector','BracketRight'],['M · Minimap','KeyM'],['V · Flight','KeyV'],['Shift · Run on/off','ShiftLeft'],['9 · Catalyst','Digit9']];
     const rows=Math.ceil(items.length/2), panelW=1.55, panelH=rows*.34+.46;
     const bg=new THREE.Mesh(new THREE.PlaneGeometry(panelW,panelH),new THREE.MeshBasicMaterial({color:0x07121d,transparent:true,opacity:.94,side:THREE.DoubleSide})); bg.position.z=-.015; menuGroup.add(bg);
     const titleCanvas=document.createElement('canvas');titleCanvas.width=640;titleCanvas.height=100;const ctx=titleCanvas.getContext('2d');ctx.fillStyle='#ffffff';ctx.font='bold 42px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(which==='numbers'?'SPAWN / MAIN MENU · Y':'TOOLS MENU · X',320,50);
@@ -7664,14 +7669,28 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
     if(!menuMode||!controllerRay(c))return;
     menuGroup.updateMatrixWorld(true);
     const hits=raycaster.intersectObjects(menuButtons,false);
-    if(hits.length){const code=hits[0].object.userData.vrKey;showMenu('');fireKey(code);}
+    if(hits.length){const item=hits[0].object.userData;showMenu('');if(typeof item.vrAction==='function'){item.vrAction();return;}if(item.vrKey){fireKey(item.vrKey);openVRSubmenuForKey(item.vrKey);}}
+  }
+  function openVRSubmenuForKey(code){
+    const map={Digit1:'#buildMenuOverlay',Digit2:'#npcMenu',Digit4:'#worldEditorMenu',Digit5:'#movingPlatformMenu',Digit9:'#catalystMenu',BracketRight:'#specialObjectMenu'};
+    const selector=map[code]; if(!selector)return;
+    const root=document.querySelector(selector); if(!root)return;
+    // The original HTML menus are DOM overlays and are not composited into immersive WebXR.
+    // Mirror their real buttons into a small in-world panel and forward selection to the originals.
+    const candidates=Array.from(root.querySelectorAll('button,[role=button]')).filter(el=>{const r=el.getBoundingClientRect();return el.textContent.trim() && (r.width>0||getComputedStyle(root).display!=='none');});
+    if(!candidates.length)return;
+    showMenu('dom'); clearMenu(); menuMode='dom'; menuGroup.visible=true;
+    const panelH=Math.min(2.5,Math.max(0.7,candidates.length*.22+.45));
+    const bg=new THREE.Mesh(new THREE.PlaneGeometry(1.55,panelH),new THREE.MeshBasicMaterial({color:0x07121d,transparent:true,opacity:.96,side:THREE.DoubleSide}));bg.position.z=-.015;menuGroup.add(bg);
+    const titleCanvas=document.createElement('canvas');titleCanvas.width=640;titleCanvas.height=90;const tc=titleCanvas.getContext('2d');tc.fillStyle='white';tc.font='bold 38px sans-serif';tc.textAlign='center';tc.fillText(root.querySelector('h1,h2,h3')?.textContent?.trim()||'Choose an option',320,54);const title=new THREE.Mesh(new THREE.PlaneGeometry(1.4,.18),new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(titleCanvas),transparent:true,side:THREE.DoubleSide}));title.position.set(0,panelH/2-.13,0);menuGroup.add(title);
+    candidates.slice(0,9).forEach((el,i)=>{const label=(el.textContent||el.getAttribute('aria-label')||'Select').trim().replace(/\s+/g,' ').slice(0,32);const mesh=new THREE.Mesh(new THREE.PlaneGeometry(1.28,.18),new THREE.MeshBasicMaterial({map:makeLabelTexture(label),side:THREE.DoubleSide}));mesh.position.set(0,panelH/2-.36-i*.22,.006);mesh.userData.vrAction=()=>{el.click(); if(selector==='#catalystMenu'||selector==='#movingPlatformMenu'||selector==='#worldEditorMenu')showMenu('');else openVRSubmenuForKey(code);};menuGroup.add(mesh);menuButtons.push(mesh);});
   }
   function readAxes(gp){
-    // WebXR's standard gamepad mapping exposes the thumbstick as axes 0/1.
-    // Do not select the most-active axis pair: on Quest the other pair can be
-    // touchpad/auxiliary axes and caused locomotion to remain at zero.
+    // xr-standard reserves axes 0/1 for touchpad and maps the physical thumbstick
+    // to axes 2/3 when those optional controls are present (Quest Touch).
     const a=Array.from(gp.axes||[],v=>Number.isFinite(v)?v:0);
-    if(a.length>=2 && Math.abs(a[0])<=1.2 && Math.abs(a[1])<=1.2) return [a[0],a[1]];
+    if(a.length>=4 && (Math.abs(a[2])+Math.abs(a[3])>0.001)) return [a[2],a[3]];
+    if(a.length>=2) return [a[0],a[1]];
     return [0,0];
   }
   function pressed(buttons,index){const b=buttons[index];return !!b&&(b.pressed===true||(Number(b.value)||0)>.65);}
@@ -7721,12 +7740,24 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
     // This keeps locomotion, jump physics and world collisions in one place.
     input.forward=0;input.right=0;
     if(leftSeen){
-      const [sx,sy]=leftAxes;const mag=Math.hypot(sx,sy);
-      if(mag>.16){
-        input.forward=THREE.MathUtils.clamp(-sy,-1,1);
-        input.right=THREE.MathUtils.clamp(sx,-1,1);
+      const [sx,sy]=leftAxes;
+      const dz=v=>Math.abs(v)<.14?0:Math.sign(v)*(Math.abs(v)-.14)/.86;
+      input.forward=THREE.MathUtils.clamp(-dz(sy),-1,1);
+      input.right=THREE.MathUtils.clamp(dz(sx),-1,1);
+      // WebXR camera pose is driven by the reference space, not camera.position.
+      // Move the XR origin as well as the game's logical player position.
+      const headCam=renderer.xr.getCamera(camera);
+      const hq=headCam.getWorldQuaternion(new THREE.Quaternion());
+      const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(hq).setY(0).normalize();
+      const right=new THREE.Vector3(1,0,0).applyQuaternion(hq).setY(0).normalize();
+      const speed=(runPressed?12:6)*(crouch?.42:1);
+      const dx=(fwd.x*input.forward+right.x*input.right)*speed*dt;
+      const dzv=(fwd.z*input.forward+right.z*input.right)*speed*dt;
+      locomotionX-=dx; locomotionZ-=dzv;
+      if(baseReferenceSpace&&typeof XRRigidTransform!=='undefined'){
+        try{const half=yawOffset/2;const t=new XRRigidTransform({x:locomotionX,y:0,z:locomotionZ},{x:0,y:Math.sin(half),z:0,w:Math.cos(half)});renderer.xr.setReferenceSpace(baseReferenceSpace.getOffsetReferenceSpace(t));}catch(e){}
       }
-    }
+    } else { input.forward=0; input.right=0; }
     if(rightSeen){
       const rx=rightAxes[0];
       if(Math.abs(rx)>.18&&baseReferenceSpace&&typeof XRRigidTransform!=='undefined'){
@@ -7744,8 +7775,8 @@ body.quest-vr-active #centerClick, body.quest-vr-active #crosshair, body.quest-v
       if(!(await navigator.xr.isSessionSupported('immersive-vr'))){showToast('Immersive VR is not supported in this browser.');return;}
       session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
       renderer.xr.setReferenceSpaceType('local-floor');renderer.xr.enabled=true;await renderer.xr.setSession(session);
-      baseReferenceSpace=renderer.xr.getReferenceSpace();yawOffset=0;lastControlTime=performance.now();renderer.setAnimationLoop(animate);
-      session.addEventListener('end',()=>{session=null;baseReferenceSpace=null;renderer.setAnimationLoop(null);showMenu('');aimDot.style.display='none';document.body.classList.remove('quest-vr-active');document.getElementById('ui').style.display='';start.style.display='block';requestAnimationFrame(animate);input.forward=input.right=0;crouch=false;});
+      baseReferenceSpace=renderer.xr.getReferenceSpace();yawOffset=0;locomotionX=locomotionZ=0;lastControlTime=performance.now();renderer.setAnimationLoop(animate);
+      session.addEventListener('end',()=>{session=null;baseReferenceSpace=null;locomotionX=locomotionZ=0;renderer.setAnimationLoop(null);showMenu('');aimDot.style.display='none';document.body.classList.remove('quest-vr-active');document.getElementById('ui').style.display='';start.style.display='block';requestAnimationFrame(animate);input.forward=input.right=0;crouch=false;});
       document.getElementById('mainMenu').style.display='none';document.getElementById('ui').style.display='none';start.style.display='none';aimDot.style.display='block';document.body.classList.add('quest-vr-active');startMusic();showToast('Quest VR ready · Y menu · X tools');
     }catch(err){console.error('Quest VR start failed',err);showToast('Could not start VR: '+(err.message||err));}
   });
